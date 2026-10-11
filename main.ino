@@ -27,35 +27,22 @@
  *************************************************************/
 
 /* Comment this out to disable prints and save space */
-#define BLYNK_PRINT Serial
-//#define USE_TIMER_3     true
 #define TEMP_OFFSET 7
-#define HW_TIMER_INTERVAL_MS      5
-
 
 #include <SPI.h>
-#include <WiFiNINA.h>
-#include <BlynkSimpleWiFiNINA.h>
-#include <FlashAsEEPROM.h> //https://github.com/cmaglie/FlashStorage
-#include <FlashStorage.h>
 #include <SAMD21PWM.h> //https://github.com/ocrdu/Arduino_SAMD21_turbo_PWM
 #include <PID_v1.h> //https://playground.arduino.cc/Code/PIDLibrary/
 #include <Adafruit_MAX31865.h>
-#include "SAMDTimerInterrupt.h"
-#include "SAMD_ISR_Timer.h"
-
-#include "credentials.h"
 
 
-BlynkTimer timer;
-int timerid;
-int periodms = 1000;
+
+const unsigned long PID_INTERVAL_MS = 1000;
+unsigned long previousPidMillis = 0;
 int count = 0;
 
-FlashStorage(setTempFlash, float);
-
 // PID
-double targetTemp, actualTemp, controlValue;
+double  actualTemp, controlValue;
+double targetTemp = 94+TEMP_OFFSET;
 double lastTemp = 0;
 double Kp_heat = 8200;
 double Ki_heat = 11000;
@@ -66,32 +53,21 @@ double Kd_brew = 20000;
 PID PIDTemp(&actualTemp, &controlValue, &targetTemp, Kp_heat, Ki_heat, Kd_heat, DIRECT);
 
 // PWM
-PWM pwm_heizung = PWM(7,64,375000,false); // 1Hz PWM Frequenz on Pin 16 (A2)
+PWM pwm_heating = PWM(7, 64, 375000, false); // 1Hz PWM Frequenz on Pin 7
 
 Adafruit_MAX31865 temp_sensor = Adafruit_MAX31865(8);
 
 bool preheat = true;
 bool brew = false;
 
-SAMDTimer ITimer(TIMER_TC3);
-SAMD_ISR_Timer ISR_Timer;
 
-
-BLYNK_WRITE(V1)
-{
-  targetTemp = param.asFloat()+TEMP_OFFSET; // assigning incoming value from pin V1 to a variable
-  setTempFlash.write(targetTemp);  // writing targetTemp to flash
-}
-void TimerHandler(void)
-{
-  ISR_Timer.run();
-}
 void pid_task()
 {
   uint16_t rtd;
-  if(temp_sensor.readRTDAsync(&rtd))
+  actualTemp = temp_sensor.temperature(100, 430);
+  if(actualTemp)
   {
-    actualTemp = temp_sensor.temperatureAsync(rtd, 100, 430);
+    //actualTemp = temp_sensor.temperatur(100, 430);
     if(lastTemp-actualTemp>0.3 && count == 0)
     {
       PIDTemp.SetTunings(Kp_brew,Ki_brew,Kd_brew);
@@ -109,22 +85,11 @@ void pid_task()
     }
     lastTemp = actualTemp;
     computePID();
-    pwm_heizung.dutyCycle((int)(controlValue/375000*1000));
-  }
-  else
-  {
-    ISR_Timer.setTimeout(11, pid_task);
+    pwm_heating.dutyCycle((int)(controlValue/375000.0*1000.0));
   }
 
-  //Serial.print((int)(controlValue/375000*1000));Serial.print("Temp:");Serial.print((int)actualTemp);Serial.print("\n");
-  //Serial.print((int)pwm_heizung.frequency());Serial.print("\n");
-}
-
-void sendTemp()
-{
-  Blynk.virtualWrite(V2,actualTemp-TEMP_OFFSET);
-  Blynk.virtualWrite(V3,(int)(controlValue/375000*1000));
-  Serial.print((int)(controlValue/375000*1000));Serial.print("Temp:");Serial.print((int)actualTemp);Serial.print("\n");
+  Serial.print("ControlValue: "); Serial.print((int)(controlValue/375000.0*1000.0)); Serial.print("\n\r");
+  Serial.print("Temp: "); Serial.print((int)actualTemp); Serial.print("\n\r");
 }
 
 void computePID()
@@ -132,17 +97,20 @@ void computePID()
 
   // read Temperature
   // Da es beim Einschalten der Maschine eine Zeit dauert bis sie heiss ist, besteht die Gefahr das der I-Anteil zu gross wird und so das Wasser zu heiss wird. Um das zu verhindern, kann die Zeitkostante des Reglers vergrössert werden,
-  // dies würde aber zu einem langsamen Regler führen, was schlecht währe, wenn ein Kaffeebezug gestartet wird, da so die Temperatur während des Bezuges nicht konstannt gehalten werden kann. Ein Bessere Möglichkeit weähre, die Heizung
+  // dies würde aber zu einem langsamen Regler führen, was schlecht währe, wenn ein Kaffeebezug gestartet wird, da so die Temperatur während des Bezuges nicht konstannt gehalten werden kann. Ein bessere Möglichkeit ist, die Heizung
   // bis zu einer Temperatur von z.B. 80°C dauerhaft einzuschalten und der Regler erst ab dieser Temperatur. So kann er schneller ausgelegt werden, da die Temperaturdifferenz zwischen soll und ist kleiner ist.
   // Besser Integral Windup auch in library enthalten
 
   if(preheat)
   {
+    Serial.print("Preheat: ");Serial.print((int)actualTemp);Serial.print("\n\r");
     controlValue = 375000;
   }
   else
   {
     PIDTemp.Compute();
+    Serial.print("PID: ");Serial.print((int)actualTemp);Serial.print("\n\r");
+    Serial.print("PID Control: ");Serial.print((int)controlValue);Serial.print("\n\r");
   }
   if(targetTemp-actualTemp < 15 && preheat)
   {
@@ -159,16 +127,14 @@ void setup()
 {
   // Debug console
   Serial.begin(9600);
+  
   //while (!Serial);
+  // delay(10000);
 
-  // initialize digital pin LED_BUILTIN as an output.
-//  pinMode(LED_BUILTIN, OUTPUT);
-
+  Serial.println("Started\n\r");
 
   // initialize the temp sensor
   temp_sensor.begin(MAX31865_3WIRE);
-
-  targetTemp = setTempFlash.read();
 
   //PID setup
   PIDTemp.SetOutputLimits(0,375000); // min max value of PWM
@@ -176,33 +142,20 @@ void setup()
   PIDTemp.Compute();
 
   //PWM setup
-  pwm_heizung.dutyCycle(500);
-  pwm_heizung.enable(true);
+  pwm_heating.dutyCycle(500);
+  pwm_heating.enable(true);
 
-  //targetTemp = 101;
-   
+  Serial.print("PWM Frequency: "); Serial.print((int)pwm_heating.frequency()); Serial.print("\n\r");
 
-  timerid = timer.setInterval((int)(1000),sendTemp);
-
-  Blynk.begin(auth, ssid, pass);
-  // You can also specify server:
-  //Blynk.begin(auth, ssid, pass, "blynk-cloud.com", 80);
-  //Blynk.begin(auth, ssid, pass, IPAddress(192,168,1,100), 8080);
-
-  if (ITimer.attachInterruptInterval(HW_TIMER_INTERVAL_MS*1000, TimerHandler))
-  {
-    Serial.print(F("Starting ITimer OK, millis() = ")); Serial.println(millis());
-  }
-  else
-  {
-    Serial.println("Can't set ITimer correctly. Select another freq. or interval");
-  }
-  ISR_Timer.setInterval(periodms, pid_task);
-
+  previousPidMillis = millis();
 }
 
 void loop()
 {
-  Blynk.run();
-  timer.run();
+  const unsigned long currentMillis = millis();
+  if (currentMillis - previousPidMillis >= PID_INTERVAL_MS)
+  {
+    previousPidMillis = currentMillis;
+    pid_task();
+  }
 }
